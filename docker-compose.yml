@@ -1,0 +1,117 @@
+version: "3.9"
+
+# ============================================================
+# Credit Risk XAI — Docker Compose Stack
+# ============================================================
+# Services:
+#   streamlit   → http://localhost:8501
+#   api         → http://localhost:8000
+#   mlflow      → http://localhost:5000
+#   postgres    → localhost:5432
+
+networks:
+  xai-network:
+    driver: bridge
+
+volumes:
+  mlflow-data:
+  postgres-data:
+  model-data:
+
+services:
+
+  # ── Streamlit Dashboard ──────────────────────────────────
+  streamlit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: credit-risk-streamlit
+    ports:
+      - "8501:8501"
+    volumes:
+      - .:/app
+      - model-data:/app/models
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - DATABASE_URL=postgresql://xai:xai_password@postgres:5432/credit_risk
+    depends_on:
+      - mlflow
+      - postgres
+    networks:
+      - xai-network
+    restart: unless-stopped
+    command: streamlit run app/main.py --server.port=8501 --server.address=0.0.0.0 --server.headless=true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── FastAPI Backend ──────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: credit-risk-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - model-data:/app/models
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - DATABASE_URL=postgresql://xai:xai_password@postgres:5432/credit_risk
+    depends_on:
+      - mlflow
+      - postgres
+    networks:
+      - xai-network
+    restart: unless-stopped
+    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --workers 2
+
+  # ── MLflow Tracking Server ───────────────────────────────
+  mlflow:
+    image: python:3.11-slim
+    container_name: credit-risk-mlflow
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow-data:/mlflow
+    environment:
+      - MLFLOW_BACKEND_STORE_URI=sqlite:////mlflow/mlflow.db
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT=/mlflow/artifacts
+    command: >
+      bash -c "pip install mlflow==2.12.1 -q &&
+               mlflow server
+               --backend-store-uri sqlite:////mlflow/mlflow.db
+               --default-artifact-root /mlflow/artifacts
+               --host 0.0.0.0 --port 5000"
+    networks:
+      - xai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ── PostgreSQL Database ──────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: credit-risk-postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=credit_risk
+      - POSTGRES_USER=xai
+      - POSTGRES_PASSWORD=xai_password
+    networks:
+      - xai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U xai -d credit_risk"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
